@@ -1,0 +1,121 @@
+/* Al revisar la base de datos "PropertyTransactions" se identifican varios problemas:
+- Formatos de fecha no estandarizados
+- Datos de dirección de propiedad inconsistentes y contienen valores nulos
+- Una sola columna tiene toda la dirección del dueño, incluyendo tanto la calle, ciudad y estado
+- Datos inconsistentes en el área de venta de propiedades
+
+A continuación se corrigen estos problemas:*/
+
+-- Las fechas aparecen en formato DD/MM/YYYY 00:00:00, queremos eliminar estos 00 y dejarlo como fecha sin hora.
+ALTER TABLE PropertyTransactions
+ADD TransactionDate Date;
+
+UPDATE PropertyTransactions
+SET TransactionDate = CONVERT(Date, SaleDate)
+-- Resultado: (58477 rows affected)
+-- Comparamos las 2 columnas, efectivamente es el mismo valor pero sin el 00:00:00
+
+ALTER TABLE PropertyTransactions
+DROP COLUMN SaleDate; -- Elimina la columna SaleDate original
+
+EXEC sp_rename 'PropertyTransactions.TransactionDate', 'TransactionDate', 'COLUMN';
+-- Renombra la columna con los datos correctos, ahora es la nueva TransactionDate
+
+
+/*Las columnas de direcciones contienen valores nulos*/
+SELECT LocationDetails
+FROM PropertyTransactions
+
+SELECT a.LandID, a.LocationDetails, b.LandID, b.LocationDetails,
+	ISNULL(a.LocationDetails, b.LocationDetails)
+FROM PropertyTransactions a
+JOIN PropertyTransactions b
+	ON a.LandID = b.LandID
+	AND a.[UniqueID ]<>b.[UniqueID ]
+WHERE a.LocationDetails IS NULL
+-- Encuentra filas donde la dirección (LocationDetails) es nula y obtiene un valor alternativo de
+-- la misma parcela por medio de un self join con otra fila de la tabla.
+
+UPDATE a
+SET LocationDetails = ISNULL(a.LocationDetails, b.LocationDetails)
+FROM PropertyTransactions a
+JOIN PropertyTransactions b
+	ON a.LandID = b.LandID
+	AND a.[UniqueID ]<>b.[UniqueID ]
+-- Reemplaza los valores nulos en la columna LocationDetails con la dirección 
+-- tomada de otra fila que tenga el mismo id de parcela
+
+/*Ya no hay valores nulos en las direcciones*/
+
+
+/*La columna de OwnerDetails contiene la calle, la ciudad y el estado delimitados con comas
+Vamos a separarlo en tres columnas:*/
+SELECT 
+PARSENAME(REPLACE(OwnerDetails, ',', '.'), 3),-- esta línea me proporciona la dirección
+PARSENAME(REPLACE(OwnerDetails, ',', '.'), 2),-- esta línea me entrega la ciudad
+PARSENAME(REPLACE(OwnerDetails, ',', '.'), 1)-- esta línea me entrega las iniciales del estado
+FROM PropertyTransactions
+
+-- Ahora vamos a agregarlos a la tabla
+
+ALTER TABLE PropertyTransactions
+ADD OwnerSplitAddress nvarchar(255);
+
+UPDATE PropertyTransactions
+SET OwnerSplitAddress = PARSENAME(REPLACE(OwnerDetails, ',', '.'), 3)
+
+ALTER TABLE PropertyTransactions
+ADD OwnerSplitCity nvarchar(255);
+
+UPDATE PropertyTransactions
+SET OwnerSplitCity = PARSENAME(REPLACE(OwnerDetails, ',', '.'), 2)
+
+ALTER TABLE PropertyTransactions
+ADD OwnerSplitState nvarchar(255);
+
+UPDATE PropertyTransactions
+SET OwnerSplitState = PARSENAME(REPLACE(OwnerDetails, ',', '.'), 1)
+
+
+/*Algo similar ocurre en la columna de LocationDetails, aunque en este caso solo hay una coma
+En esta oportunidad de hará el cambio por medio de substrings:*/
+
+SELECT
+SUBSTRING(LocationDetails, 1, CHARINDEX(',', LocationDetails) -1) AS address,
+-- con esta línea se va a buscar desde la primera posición hasta la primera coma y devolverá ese valor sin la coma
+-- Por ejemplo si es "Calle Juana 32, California" en Address estará el valor "Calle Juana 32"
+SUBSTRING(LocationDetails, CHARINDEX(',', LocationDetails) +1, LEN(LocationDetails)) AS address2
+-- similar al anterior, pero en esta ocasión city tendrá el valor "California"
+FROM PropertyTransactions
+
+-- En address está la dirección y en city la ciudad, ahora vamos a agregar esos valores a la tabla
+
+ALTER TABLE PropertyTransactions
+ADD PropertySplitAddress nvarchar(255);
+
+UPDATE PropertyTransactions
+SET PropertySplitAddress = SUBSTRING(LocationDetails, 1, CHARINDEX(',', LocationDetails) -1)
+
+ALTER TABLE PropertyTransactions
+ADD PropertySplitCity nvarchar(255);
+
+UPDATE PropertyTransactions
+SET PropertySplitCity = SUBSTRING(LocationDetails, CHARINDEX(',', LocationDetails) +1, LEN(LocationDetails))
+
+
+/* En la columna de ventas, en la estado de si se vendió o no indica Yes, Y, No y N*/
+SELECT DISTINCT (VacantStatus), Count(VacantStatus)
+FROM PropertyTransactions
+GROUP BY VacantStatus
+ORDER BY 2
+
+-- Hay 70 Y, 452 N, 4573 Yes y 53388 No
+-- Vamos a homologarlo, quedarán solo Yes y No
+
+UPDATE PropertyTransactions
+SET VacantStatus =
+CASE WHEN VacantStatus = 'Y' THEN 'Yes'
+	WHEN VacantStatus = 'N' THEN 'No'
+	ELSE VacantStatus
+	END
+FROM PropertyTransactions
